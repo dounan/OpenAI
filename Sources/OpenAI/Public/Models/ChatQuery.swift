@@ -678,10 +678,12 @@ public struct ChatQuery: Equatable, Codable, Streamable, Sendable {
         case text
         case jsonObject
         case jsonSchema(name: String, type: StructuredOutput.Type)
+        case dynamicJsonSchema(DynamicJSONSchema)
         
         enum CodingKeys: String, CodingKey {
             case type
             case jsonSchema = "json_schema"
+            case dynamicJsonSchema
         }
         
         public func encode(to encoder: any Encoder) throws {
@@ -695,6 +697,9 @@ public struct ChatQuery: Equatable, Codable, Streamable, Sendable {
                 try container.encode("json_schema", forKey: .type)
                 let schema = JSONSchema(name: name, schema: type.example)
                 try container.encode(schema, forKey: .jsonSchema)
+            case .dynamicJsonSchema(let dynamicJSONSchema):
+                try container.encode("json_schema", forKey: .type)
+                try container.encode(dynamicJSONSchema, forKey: .jsonSchema)
             }
         }
         
@@ -704,6 +709,8 @@ public struct ChatQuery: Equatable, Codable, Streamable, Sendable {
             case (.jsonObject, .jsonObject): return true
             case (.jsonSchema(let lhsName, let lhsType), .jsonSchema(let rhsName, let rhsType)):
                 return lhsName == rhsName && lhsType == rhsType
+            case (.dynamicJsonSchema(let lhsSchema), .dynamicJsonSchema(let rhsSchema)):
+                return lhsSchema == rhsSchema
             default:
                 return false
             }
@@ -929,6 +936,36 @@ public struct ChatQuery: Equatable, Codable, Streamable, Sendable {
             case .nilFoundInExample:
                 return "Found nils when serializing the StructuredOutput‘s example. Provide values for all optional properties in the example."
             }
+        }
+    }
+    
+    public struct DynamicJSONSchema: Encodable, Sendable, Equatable {
+        let name: String
+        let schema: Encodable & Sendable
+        
+        enum CodingKeys: String, CodingKey {
+            case name
+            case schema
+            case strict
+        }
+        
+        public init(name: String, schema: Encodable & Sendable) {
+            self.name = name
+            self.schema = schema
+        }
+        
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(schema, forKey: .schema)
+            try container.encode(true, forKey: .strict)
+        }
+        
+        public static func == (lhs: DynamicJSONSchema, rhs: DynamicJSONSchema) -> Bool {
+            guard lhs.name == rhs.name else { return false }
+            let lhsData = try? JSONEncoder().encode(lhs.schema)
+            let rhsData = try? JSONEncoder().encode(rhs.schema)
+            return lhsData == rhsData
         }
     }
 
@@ -1213,18 +1250,21 @@ public struct JSONSchema: Codable, Hashable, Sendable {
     public let multipleOf: Int?
     public let minimum: Int?
     public let maximum: Int?
+    private let additionalProperties: Int?
 
     private enum CodingKeys: String, CodingKey {
         case type, properties, required, pattern, const
         case enumValues = "enum"
         case multipleOf, minimum, maximum
+        case additionalProperties
     }
-
+    
     public struct Property: Codable, Hashable, Sendable {
         public let type: JSONType
         public let description: String?
         public let format: String?
         public let items: Items?
+        public let properties: [String: Property]?
         public let required: [String]?
         public let pattern: String?
         public let const: String?
@@ -1235,19 +1275,22 @@ public struct JSONSchema: Codable, Hashable, Sendable {
         public let minItems: Int?
         public let maxItems: Int?
         public let uniqueItems: Bool?
+        private let additionalProperties: Bool?
 
         private enum CodingKeys: String, CodingKey {
-            case type, description, format, items, required, pattern, const
+            case type, description, format, items, properties, required, pattern, const
             case enumValues = "enum"
             case multipleOf, minimum, maximum
             case minItems, maxItems, uniqueItems
+            case additionalProperties
         }
 
-        public init(type: JSONType, description: String? = nil, format: String? = nil, items: Items? = nil, required: [String]? = nil, pattern: String? = nil, const: String? = nil, enumValues: [String]? = nil, multipleOf: Int? = nil, minimum: Double? = nil, maximum: Double? = nil, minItems: Int? = nil, maxItems: Int? = nil, uniqueItems: Bool? = nil) {
+        public init(type: JSONType, description: String? = nil, format: String? = nil, items: Items? = nil, properties: [String: Property]? = nil, required: [String]? = nil, pattern: String? = nil, const: String? = nil, enumValues: [String]? = nil, multipleOf: Int? = nil, minimum: Double? = nil, maximum: Double? = nil, minItems: Int? = nil, maxItems: Int? = nil, uniqueItems: Bool? = nil) {
             self.type = type
             self.description = description
             self.format = format
             self.items = items
+            self.properties = properties
             self.required = required
             self.pattern = pattern
             self.const = const
@@ -1258,6 +1301,55 @@ public struct JSONSchema: Codable, Hashable, Sendable {
             self.minItems = minItems
             self.maxItems = maxItems
             self.uniqueItems = uniqueItems
+            self.additionalProperties = nil
+        }
+        
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(type, forKey: .type)
+            if let description {
+                try container.encode(description, forKey: .description)
+            }
+            if let format {
+                try container.encode(format, forKey: .format)
+            }
+            if let items {
+                try container.encode(items, forKey: .items)
+            }
+            if let properties {
+                try container.encode(properties, forKey: .properties)
+            }
+            if let required {
+                try container.encode(required, forKey: .required)
+            }
+            if let pattern {
+                try container.encode(pattern, forKey: .pattern)
+            }
+            if let const {
+                try container.encode(const, forKey: .const)
+            }
+            if let enumValues {
+                try container.encode(enumValues, forKey: .enumValues)
+            }
+            if let multipleOf {
+                try container.encode(multipleOf, forKey: .multipleOf)
+            }
+            if let minimum {
+                try container.encode(minimum, forKey: .minimum)
+            }
+            if let maximum {
+                try container.encode(maximum, forKey: .maximum)
+            }
+            if let minItems {
+                try container.encode(minItems, forKey: .minItems)
+            }
+            if let maxItems {
+                try container.encode(maxItems, forKey: .maxItems)
+            }
+            if let uniqueItems {
+                try container.encode(uniqueItems, forKey: .uniqueItems)
+            }
+            try container.encode(false, forKey: .additionalProperties)
         }
     }
 
@@ -1315,6 +1407,37 @@ public struct JSONSchema: Codable, Hashable, Sendable {
         self.multipleOf = multipleOf
         self.minimum = minimum
         self.maximum = maximum
+        self.additionalProperties = nil
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        if let properties {
+            try container.encode(properties, forKey: .properties)
+        }
+        if let required {
+            try container.encode(required, forKey: .required)
+        }
+        if let pattern {
+            try container.encode(pattern, forKey: .pattern)
+        }
+        if let const {
+            try container.encode(const, forKey: .const)
+        }
+        if let enumValues {
+            try container.encode(enumValues, forKey: .enumValues)
+        }
+        if let multipleOf {
+            try container.encode(multipleOf, forKey: .multipleOf)
+        }
+        if let minimum {
+            try container.encode(minimum, forKey: .minimum)
+        }
+        if let maximum {
+            try container.encode(maximum, forKey: .maximum)
+        }
+        try container.encode(false, forKey: .additionalProperties)
     }
 }
 
